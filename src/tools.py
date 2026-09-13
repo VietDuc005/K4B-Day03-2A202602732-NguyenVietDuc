@@ -43,9 +43,42 @@ TOOLS_SCHEMA = [
         "parameters": {
             "type": "object",
             "properties": {
-                # TODO 1.2: Khai báo các thuộc tính tham số cho Tool tại đây...
+                "student_id": {
+                    "type": "string",
+                    "description": "Mã sinh viên cần đặt lịch hẹn tư vấn học vụ (ví dụ: 'SV2026001')."
+                },
+                "datetime_str": {
+                    "type": "string",
+                    "description": "Thời gian hẹn tư vấn theo định dạng dễ đọc (ví dụ: '14:00 15/09/2026')."
+                },
+                "advisor_name": {
+                    "type": "string",
+                    "description": "Tên cố vấn học tập phụ trách buổi tư vấn."
+                }
             },
-            "required": [] # TODO 1.2: Khai báo danh sách các trường bắt buộc tại đây...
+            "required": ["student_id", "datetime_str", "advisor_name"]
+        }
+    },
+    {
+        "name": "update_student_profile",
+        "description": "Cập nhật một trường thông tin trong hồ sơ học vụ của sinh viên VinUni sau khi đã được xác nhận.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "student_id": {
+                    "type": "string",
+                    "description": "Mã sinh viên cần cập nhật hồ sơ (ví dụ: 'SV2026001')."
+                },
+                "field_to_update": {
+                    "type": "string",
+                    "description": "Tên trường hồ sơ cần cập nhật, ví dụ: 'email', 'status', 'advisor'."
+                },
+                "new_value": {
+                    "type": "string",
+                    "description": "Giá trị mới sẽ được ghi vào trường hồ sơ đã chọn."
+                }
+            },
+            "required": ["student_id", "field_to_update", "new_value"]
         }
     }
 ]
@@ -102,10 +135,41 @@ def execute_schedule_appointment(student_id: str, datetime_str: str, advisor_nam
     }, ensure_ascii=False)
 
 
+def execute_update_student_profile(student_id: str, field_to_update: str, new_value: str) -> str:
+    """Thực thi cập nhật một trường hồ sơ sinh viên trong cơ sở dữ liệu mô phỏng"""
+    normalized_student_id = student_id.strip().upper()
+    student = MOCK_DATABASE.get(normalized_student_id)
+    if not student:
+        return json.dumps({
+            "status": "NOT_FOUND",
+            "message": f"Không tìm thấy dữ liệu sinh viên có mã '{student_id}'"
+        }, ensure_ascii=False)
+
+    allowed_fields = {"email", "status", "advisor"}
+    normalized_field = field_to_update.strip()
+    if normalized_field not in allowed_fields:
+        return json.dumps({
+            "status": "VALIDATION_ERROR",
+            "message": f"Không được phép cập nhật trường '{field_to_update}'. Các trường hợp lệ: {sorted(allowed_fields)}"
+        }, ensure_ascii=False)
+
+    old_value = student.get(normalized_field)
+    student[normalized_field] = new_value
+    return json.dumps({
+        "status": "SUCCESS",
+        "student_id": normalized_student_id,
+        "field_updated": normalized_field,
+        "old_value": old_value,
+        "new_value": new_value,
+        "message": f"Đã cập nhật {normalized_field} của sinh viên {normalized_student_id} từ '{old_value}' thành '{new_value}'."
+    }, ensure_ascii=False)
+
+
 # Router gọi tool thực tế
 TOOL_ROUTER = {
     "academic_query": execute_academic_query,
-    "schedule_appointment": execute_schedule_appointment
+    "schedule_appointment": execute_schedule_appointment,
+    "update_student_profile": execute_update_student_profile
 }
 
 def dispatch_tool_call(tool_name: str, arguments: Dict[str, Any]) -> str:

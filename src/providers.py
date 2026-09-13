@@ -38,7 +38,32 @@ class MockOfflineProvider(BaseLLMProvider):
         prompt_lower = prompt.lower()
         
         # Mô phỏng nhận diện intent gọi Tool
-        if "sv2026001" in prompt_lower and "đặt lịch" in prompt_lower:
+        if "sv2026001" in prompt_lower and "cập nhật" in prompt_lower and "email" in prompt_lower:
+            return {
+                "type": "tool_call",
+                "tool_name": "update_student_profile",
+                "arguments": {
+                    "student_id": "SV2026001",
+                    "field_to_update": "email",
+                    "new_value": "duc.test@vinuni.edu.vn"
+                },
+                "thought": "Người dùng yêu cầu cập nhật email sinh viên. Tôi chỉ đề xuất tool update_student_profile; ứng dụng sẽ kiểm tra HITL trước khi thực thi."
+            }
+        elif "sv9999999" in prompt_lower:
+            return {
+                "type": "tool_call",
+                "tool_name": "academic_query",
+                "arguments": {"student_id": "SV9999999"},
+                "thought": "Người dùng muốn tra cứu một mã sinh viên chưa có trong hệ thống. Tôi sẽ gọi tool academic_query để kiểm chứng trước khi trả lời."
+            }
+        elif "sv2026001" in prompt_lower and "đặt lịch" in prompt_lower and ("kiểm tra" in prompt_lower or "tra cứu" in prompt_lower):
+            return {
+                "type": "tool_call",
+                "tool_name": "academic_query",
+                "arguments": {"student_id": "SV2026001"},
+                "thought": "Người dùng yêu cầu vừa kiểm tra thông tin học vụ vừa đặt lịch với cố vấn của sinh viên. Tôi cần tra cứu hồ sơ trước để lấy đúng cố vấn."
+            }
+        elif "sv2026001" in prompt_lower and "đặt lịch" in prompt_lower:
             return {
                 "type": "tool_call",
                 "tool_name": "schedule_appointment",

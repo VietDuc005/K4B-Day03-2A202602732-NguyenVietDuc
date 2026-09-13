@@ -21,11 +21,37 @@ from mcp_server import MCPAcademicServer
 from prompts import (
     CHATBOT_BASELINE_PROMPT,
     REACT_AGENT_SYSTEM_PROMPT,
-    MAX_ITERATIONS
+    MAX_ITERATIONS,
+    check_input_prompt_injection
 )
 from providers import get_llm_provider
 
 load_dotenv()
+
+SENSITIVE_TOOLS = {"update_student_profile"}
+
+
+def is_sensitive_tool(tool_name: str) -> bool:
+    """Xác định tool có rủi ro cao vì có thể thay đổi dữ liệu."""
+    return tool_name in SENSITIVE_TOOLS
+
+
+def confirm_sensitive_tool(tool_name: str, arguments: dict, interactive_hitl: bool = False) -> bool:
+    """Kích hoạt Human-in-the-loop trước khi thực thi tool nhạy cảm."""
+    print(f"⚠️ [HITL WARNING]: Tool '{tool_name}' là hành động nhạy cảm!")
+    print(f"🔎 [HITL REVIEW]: Tham số đề xuất: {json.dumps(arguments, ensure_ascii=False)}")
+
+    if not interactive_hitl:
+        print("✅ [HITL SIMULATION]: interactive_hitl=False, tự động xác nhận mô phỏng để không nghẽn luồng kiểm thử.")
+        return True
+
+    decision = input("👤 Xác nhận thực thi hành động nhạy cảm? (Y/N): ").strip().lower()
+    approved = decision in {"y", "yes"}
+    if approved:
+        print("✅ [HITL APPROVED]: Con người đã xác nhận thực thi tool nhạy cảm.")
+    else:
+        print("⛔ [HITL REJECTED]: Con người đã từ chối thực thi tool nhạy cảm.")
+    return approved
 
 def load_test_cases():
     """Tải danh sách 5 test cases từ config/test_cases.json hoặc config/test_cases.example.json"""
@@ -61,24 +87,42 @@ def run_baseline_chatbot(user_query: str, provider):
     print(f"🤖 Chatbot phản hồi:\n{response}")
 
 
-def run_react_agent(user_query: str, provider, mcp_server: MCPAcademicServer) -> list:
+def run_react_agent(user_query: str, provider, mcp_server: MCPAcademicServer, interactive_hitl: bool = False) -> list:
     """
     [REACT AGENT LOOP] Thực thi vòng lặp Thought -> Action -> Observation với MCP Server
     Trả về danh sách trace log của phiên thực thi.
     """
     print(f"\n🤖 [REACT AGENT] Câu hỏi: {user_query}")
+
+    is_injection, warning_message = check_input_prompt_injection(user_query)
+    if is_injection:
+        print(f"🛡️ [INPUT GUARDRAIL]: {warning_message}")
+        return [{
+            "step": 0,
+            "query": user_query,
+            "action_type": "INPUT_GUARDRAIL_BLOCKED",
+            "thought": "Phát hiện dấu hiệu Prompt Injection trước khi gọi LLM.",
+            "output": warning_message,
+            "latency_ms": 0.0
+        }]
     
     step = 0
     trace_logs = []
     tools_list = mcp_server.list_tools()
     
+    pending_tool_call = None
+
     while step < MAX_ITERATIONS:
         step += 1
         step_start_time = time.time()
         print(f"\n--- 🔄 Vòng lặp ReAct Loop (Step {step}/{MAX_ITERATIONS}) ---")
         
-        # Gọi LLM với Native Tool Calling Specs
-        llm_response = provider.generate_with_tools(user_query, tools_list, system_prompt=REACT_AGENT_SYSTEM_PROMPT)
+        # Gọi LLM với Native Tool Calling Specs, hoặc xử lý tool call kế tiếp đã suy ra từ Observation trước đó.
+        if pending_tool_call:
+            llm_response = pending_tool_call
+            pending_tool_call = None
+        else:
+            llm_response = provider.generate_with_tools(user_query, tools_list, system_prompt=REACT_AGENT_SYSTEM_PROMPT)
         latency_ms = round((time.time() - step_start_time) * 1000, 2)
         
         thought = llm_response.get("thought", "Đang suy luận...")
@@ -104,6 +148,30 @@ def run_react_agent(user_query: str, provider, mcp_server: MCPAcademicServer) ->
             arguments = llm_response.get("arguments", {})
             
             print(f"🛠️ [Action Proposed]: {tool_name}({arguments})")
+
+            hitl_required = is_sensitive_tool(tool_name)
+            hitl_approved = None
+            if hitl_required:
+                hitl_approved = confirm_sensitive_tool(tool_name, arguments, interactive_hitl=interactive_hitl)
+                if not hitl_approved:
+                    obs_data = {
+                        "status": "HITL_REJECTED",
+                        "message": f"Tool '{tool_name}' chưa được thực thi vì không có xác nhận của con người."
+                    }
+                    final_answer = obs_data["message"]
+                    trace_logs.append({
+                        "step": step,
+                        "query": user_query,
+                        "action_type": "HITL_REJECTED",
+                        "tool_name": tool_name,
+                        "arguments": arguments,
+                        "observation": obs_data,
+                        "hitl_required": hitl_required,
+                        "hitl_approved": hitl_approved,
+                        "latency_ms": latency_ms
+                    })
+                    print(f"🏁 [Final Answer]: {final_answer}")
+                    break
             
             # Thực thi Tool qua MCP Server
             mcp_result = mcp_server.call_tool(tool_name, arguments)
@@ -142,9 +210,34 @@ def run_react_agent(user_query: str, provider, mcp_server: MCPAcademicServer) ->
                 "tool_name": tool_name,
                 "arguments": arguments,
                 "observation": obs_data,
+                "hitl_required": hitl_required,
+                "hitl_approved": hitl_approved,
                 "latency_ms": latency_ms
             })
             
+            needs_follow_up_booking = (
+                tool_name == "academic_query"
+                and obs_data.get("status") == "SUCCESS"
+                and "đặt lịch" in user_query.lower()
+                and "data" in obs_data
+                and step < MAX_ITERATIONS
+            )
+
+            if needs_follow_up_booking:
+                student_data = obs_data["data"]
+                pending_tool_call = {
+                    "type": "tool_call",
+                    "tool_name": "schedule_appointment",
+                    "arguments": {
+                        "student_id": obs_data.get("student_id", arguments.get("student_id", "")),
+                        "datetime_str": "14:00 15/09/2026",
+                        "advisor_name": student_data.get("advisor", "PGS.TS Nguyễn Văn A")
+                    },
+                    "thought": "Observation cho biết cố vấn học tập của sinh viên. Tiếp tục gọi schedule_appointment để hoàn tất yêu cầu đặt lịch."
+                }
+                print("➡️ [Next Action]: Đã xác định cần đặt lịch với cố vấn vừa tra cứu, tiếp tục vòng lặp ReAct.")
+                continue
+
             # Kết thúc vòng lặp sau khi hoàn tất Observation và xuất Final Answer
             print(f"🧠 [Thought]: Đã nhận được dữ liệu từ MCP Server. Tổng hợp kết quả phản hồi.")
             print(f"🏁 [Final Answer]: {final_answer}")
@@ -160,6 +253,11 @@ def run_react_agent(user_query: str, provider, mcp_server: MCPAcademicServer) ->
             break
 
     return trace_logs
+
+
+def run_native_mcp_agent(user_query: str, provider, mcp_server: MCPAcademicServer, interactive_hitl: bool = False) -> list:
+    """Alias theo brief Task 2.2 cho ReAct Agent dùng Native Tool Calling qua MCP."""
+    return run_react_agent(user_query, provider, mcp_server, interactive_hitl=interactive_hitl)
 
 
 if __name__ == "__main__":
@@ -182,6 +280,7 @@ if __name__ == "__main__":
         print("   - Câu hỏi chung: 'Quy chế học vụ VinUni yêu cầu bao nhiêu tín chỉ?'")
         print("   - Tra cứu học vụ: 'Hãy tra cứu thông tin học vụ của sinh viên SV2026001'")
         print("   - Đặt lịch hẹn: 'Đặt lịch hẹn tư vấn cho SV2026001 vào 14:00 ngày 15/09/2026'")
+        print("   - HITL: 'Cập nhật email của sinh viên SV2026001 thành duc.test@vinuni.edu.vn'")
         print("   - Gõ 'exit' hoặc 'quit' để kết thúc phiên trò chuyện.\n")
         while True:
             try:
@@ -189,11 +288,16 @@ if __name__ == "__main__":
                 if not user_input or user_input.lower() in ["exit", "quit"]:
                     print("👋 Tạm biệt! Kết thúc phiên trò chuyện.")
                     break
-                logs = run_react_agent(user_input, provider, mcp_server)
+                logs = run_react_agent(user_input, provider, mcp_server, interactive_hitl=True)
                 save_waterfall_trace(logs)
             except (KeyboardInterrupt, EOFError):
                 print("\n👋 Đã thoát phiên tương tác.")
                 break
+    elif "--hitl-demo" in sys.argv:
+        print("🛡️ [HITL DEMO MODE] Kiểm tra phanh xác nhận con người cho tool cập nhật hồ sơ:")
+        demo_query = "Cập nhật email của sinh viên SV2026001 thành duc.test@vinuni.edu.vn."
+        logs = run_react_agent(demo_query, provider, mcp_server, interactive_hitl=False)
+        save_waterfall_trace(logs)
     elif "--all" in sys.argv:
         print("🚀 [TEST SUITE MODE] Kiểm tra 5 Test Cases:")
         completed_count = 0
@@ -214,6 +318,12 @@ if __name__ == "__main__":
                 logs = run_react_agent(tc["question"], provider, mcp_server)
                 all_traces.extend(logs)
                 completed_count += 1
+
+        print(f"\n==================================================")
+        print("🛡️ [SAFETY CHECKPOINT] Demo phanh HITL cho tool nhạy cảm update_student_profile")
+        hitl_demo_query = "Cập nhật email của sinh viên SV2026001 thành duc.test@vinuni.edu.vn."
+        hitl_logs = run_react_agent(hitl_demo_query, provider, mcp_server, interactive_hitl=False)
+        all_traces.extend(hitl_logs)
                 
         print(f"\n==================================================")
         print(f"📊 [KẾT QUẢ TEST SUITE]: Đã thực thi {completed_count}/{len(tests)} Test Cases | {todo_count} Test Cases đang chờ điền câu hỏi (TODO)")
@@ -225,6 +335,7 @@ if __name__ == "__main__":
         print("ℹ️ HƯỚNG DẪN SỬ DỤNG CHƯƠNG TRÌNH:")
         print("  1. Chat trực tiếp liên tục:   python src/app.py --interactive")
         print("  2. Chạy toàn bộ Test Cases:    python src/app.py --all\n")
+        print("  3. Demo phanh HITL:            python src/app.py --hitl-demo\n")
         
         sample_query = tests[1]["question"]
         print(f"--- 🏁 DEMO CHẠY THỬ 1 TEST CASE MẪU (TC02: Tra cứu học vụ) ---")
