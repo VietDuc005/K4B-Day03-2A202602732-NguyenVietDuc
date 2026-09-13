@@ -118,7 +118,7 @@ Dán 1 đoạn trích xuất log tiêu biểu từ file `docs/trace_waterfall.js
 - **Số lượt Prompt Injection bị Input Guardrail chặn:** 1 lượt.
 - **Số lượt HITL được kích hoạt cho tool nhạy cảm:** 1 lượt *(mô phỏng xác nhận với `interactive_hitl=False` để không nghẽn luồng kiểm thử).*
 - **Tổng số sự kiện trong `docs/trace_waterfall.json`:** 11 sự kiện.
-- **Kết quả đẩy Repo nộp bài:** [ ] Đã Commit và Push mã nguồn thành công lên GitHub cá nhân.
+- **Kết quả đẩy Repo nộp bài:** [x] Đã Commit và Push mã nguồn thành công lên GitHub cá nhân.
 
 ---
 
